@@ -106,3 +106,21 @@ impl<'de> serde::Deserialize<'de> for SegOfs {
         deserializer.deserialize_str(SegOfsVisitor)
     }
 }
+
+#[cfg(feature = "serde")]
+impl schemars::JsonSchema for SegOfs {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "segofs".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "segment:offset in hex",
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+}
