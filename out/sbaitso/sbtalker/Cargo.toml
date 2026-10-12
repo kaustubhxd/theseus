@@ -7,3 +7,4 @@ edition = "2024"
 dos = { workspace = true }
 runtime = { workspace = true }
 zerocopy = { workspace = true }
+log = { workspace = true }

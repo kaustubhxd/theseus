@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 use runtime::{Cont, Context, SegOfs};
 use zerocopy::FromBytes;
 
@@ -76,7 +78,7 @@ fn call(ctx: &mut Context, addr: SegOfs) {
 
 pub fn driver_loaded(ctx: &mut Context) -> Cont {
     let driver = DriverData::from_context(ctx);
-    driver.buf1.set(b"hello there, i am dr. sbaitso");
+    driver.buf1.set(b"hello mastodon, i am dr. sbaitso.");
     driver.buf2.set(b"test text");
 
     let entry_point = driver.entry_point;
@@ -91,5 +93,44 @@ pub fn driver_loaded(ctx: &mut Context) -> Cont {
     ctx.cpu.regs.set_al(/* say */ 7);
     call(ctx, entry_point);
 
+    let audio = AUDIO.lock().unwrap();
+    log::info!("audio buffer: {:x} bytes", audio.buf.len());
+    std::fs::write("sb.raw", &audio.buf).unwrap();
+
     todo!()
+}
+
+struct Audio {
+    buf: Vec<u8>,
+}
+static AUDIO: Mutex<Audio> = Mutex::new(Audio { buf: vec![] });
+
+pub fn audio_init(ctx: &mut Context) -> Cont {
+    println!("audio init called");
+    ctx.cpu.regs.set_ax(0); // success
+    ctx.cpu.regs.set_di(0); // buffer id
+    ctx.retf16(0)
+}
+
+pub fn audio_get_buffer(ctx: &mut Context) -> Cont {
+    // let audio = AUDIO.lock().unwrap();
+    ctx.cpu.regs.set_di(0); // buffer id
+    ctx.retf16(0)
+}
+
+pub fn audio_put_sample(ctx: &mut Context) -> Cont {
+    let sample = ctx.cpu.regs.get_al();
+    let mut audio = AUDIO.lock().unwrap();
+    audio.buf.push(sample);
+    ctx.cpu.regs.set_di(0);
+    ctx.retf16(0)
+}
+
+pub fn audio_noop(ctx: &mut Context) -> Cont {
+    ctx.retf16(0)
+}
+
+pub fn audio_flush(ctx: &mut Context) -> Cont {
+    ctx.cpu.regs.set_di(0);
+    ctx.retf16(0)
 }
