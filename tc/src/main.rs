@@ -25,12 +25,12 @@ fn parse_ip_range(val: &str) -> Result<std::ops::Range<IP>, String> {
     Ok(start..end)
 }
 
-fn parse_extern(val: &str) -> Result<(u32, Option<String>), String> {
+fn parse_extern(val: &str) -> Result<(IP, Option<String>), String> {
     let (val, name) = match val.split_once('=') {
         None => (val, None),
         Some((val, name)) => (val, Some(name.into())),
     };
-    Ok((parse_hex(val)?, name))
+    Ok((parse_ip(val)?, name))
 }
 
 #[derive(argh::FromArgs)]
@@ -82,7 +82,7 @@ struct Args {
 
     /// blocks written by hand
     #[argh(option, long = "extern", from_str_fn(parse_extern))]
-    externs: Vec<(u32, Option<String>)>,
+    externs: Vec<(IP, Option<String>)>,
 
     /// emit output that traces each basic block as it's executed
     #[argh(switch)]
@@ -99,9 +99,9 @@ fn run() -> anyhow::Result<()> {
         state.load_symbols(std::fs::File::open(path)?)?;
     }
     for (addr, name) in args.externs {
-        let name = name.unwrap_or_else(|| format!("x{:x}", addr));
+        let name = name.unwrap_or_else(|| format!("x{}", addr));
         state.addr_info.insert(
-            addr,
+            addr.to_addr(),
             AddrInfo {
                 name: format!("crate::externs::{}", name),
                 is_extern: true,

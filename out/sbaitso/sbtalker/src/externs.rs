@@ -74,7 +74,7 @@ fn call(ctx: &mut Context, addr: SegOfs) {
     dos::run_loop(ctx, f, true, |ctx| ctx.cpu.regs.get_sp() != orig_sp);
 }
 
-pub fn x11(ctx: &mut Context) -> Cont {
+pub fn driver_loaded(ctx: &mut Context) -> Cont {
     let driver = DriverData::from_context(ctx);
     driver.buf1.set(b"hello there, i am dr. sbaitso");
     driver.buf2.set(b"test text");

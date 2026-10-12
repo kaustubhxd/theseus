@@ -55,7 +55,7 @@ mod part_01;
 pub use part_01::*;
 
 const BLOCKS: [(u32, ContFn); 2014] = [
-    (0x11, crate::externs::x11),
+    (0x11, crate::externs::driver_loaded),
     (0x8a34, x0823_0804),
     (0x8a5e, x0823_082e),
     (0x8a7d, x0823_084d),
