@@ -96,3 +96,16 @@ pub fn run(exe: &EXEData) {
     let mut ctx = load(exe);
     start(&mut ctx, exe);
 }
+#[path = "rr_stubs_tapi32.rs"]
+pub mod tapi32;
+#[path = "rr_stubs_wsock32.rs"]
+pub mod wsock32;
+#[path = "rr_stubs_comdlg32.rs"]
+pub mod comdlg32;
+#[path = "rr_stubs_comctl32.rs"]
+pub mod comctl32;
+#[path = "rr_stubs_aweman32.rs"]
+pub mod aweman32;
+pub mod rr_resdll;
+pub mod rr_text;
+pub mod rr_registry;

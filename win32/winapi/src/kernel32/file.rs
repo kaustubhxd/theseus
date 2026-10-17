@@ -116,6 +116,16 @@ pub fn CreateFileA(
     _hTemplateFile: u32,
 ) -> crate::HANDLE {
     let name = ctx.memory.read_str(lpFileName.addr);
+    // Road Rash evaluation: "\\.\X" names are devices/VxDs, never files. The
+    // web's in-memory FS used to create one, making Road Rash think its
+    // memory-locking VxD was present.
+    if name.starts_with("\\\\.\\") || name.starts_with("//./") {
+        log::warn!("CreateFileA({name:?}): device paths not supported");
+        return crate::HANDLE::from_raw(0xffff_ffff);
+    }
+    if name.to_ascii_lowercase().ends_with(".mid") {
+        crate::winmm::rr_midi::note_midi_file(&name); // Road Rash evaluation: pick the song's AWE32 bank
+    }
     let path = resolve_path(&name);
     let write = dwDesiredAccess & GENERIC_WRITE != 0;
     let read = dwDesiredAccess & GENERIC_READ != 0;
@@ -294,6 +304,9 @@ pub fn FlushFileBuffers(_ctx: &mut Context, hFile: crate::HANDLE) -> bool {
 #[win32_derive::dllexport]
 pub fn CloseHandle(_ctx: &mut Context, hObject: crate::HANDLE) -> bool {
     // Also called for handles we don't track (stdio etc.); succeed regardless.
+    if rr_mapping::close(hObject.to_raw()) {
+        return true; // Road Rash evaluation: file mapping
+    }
     lock().objects.remove(hObject);
     true
 }
@@ -548,5 +561,77 @@ mod tests {
             let got = wildcard_match(pattern.as_bytes(), name.as_bytes());
             assert_eq!(got, want, "{pattern:?} vs {name:?}");
         }
+    }
+}
+
+/// Road Rash evaluation: size of an open file handle (for GetFileSize).
+pub fn rr_file_size(h: u32) -> Option<u64> {
+    use std::io::{Seek, SeekFrom};
+    let mut kernel32 = lock();
+    let Some(Object::File(file)) = kernel32.objects.get_mut(crate::HANDLE::from_raw(h)) else {
+        return None;
+    };
+    let pos = file.stream_position().ok()?;
+    let len = file.seek(SeekFrom::End(0)).ok()?;
+    file.seek(SeekFrom::Start(pos)).ok()?;
+    Some(len)
+}
+
+/// Road Rash evaluation: read-only file mappings. The game closes the file
+/// handle right after CreateFileMapping, so the contents are captured then.
+pub mod rr_mapping {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static MAPS: Mutex<Option<HashMap<u32, Vec<u8>>>> = Mutex::new(None);
+    static VIEWS: Mutex<Option<HashMap<u32, u32>>> = Mutex::new(None);
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x6d00_0001);
+
+    pub fn create(h_file: u32) -> u32 {
+        use std::io::{Read, Seek, SeekFrom};
+        let data = {
+            let mut kernel32 = super::lock();
+            let Some(super::Object::File(file)) = kernel32.objects.get_mut(crate::HANDLE::from_raw(h_file)) else {
+                return 0;
+            };
+            let pos = file.stream_position().unwrap_or(0);
+            let mut buf = Vec::new();
+            if file.seek(SeekFrom::Start(0)).is_err() || file.read_to_end(&mut buf).is_err() {
+                return 0;
+            }
+            let _ = file.seek(SeekFrom::Start(pos));
+            buf
+        };
+        let h = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        log::info!("rr: CreateFileMapping({h_file:#x}) -> {h:#x}, {} bytes", data.len());
+        MAPS.lock().unwrap().get_or_insert_with(Default::default).insert(h, data);
+        h
+    }
+
+    pub fn map_view(ctx: &mut runtime::Context, h_map: u32, offset: u32, len: u32) -> u32 {
+        let maps = MAPS.lock().unwrap();
+        let Some(data) = maps.as_ref().and_then(|m| m.get(&h_map)) else { return 0 };
+        let start = (offset as usize).min(data.len());
+        let n = if len == 0 { data.len() - start } else { (len as usize).min(data.len() - start) };
+        let addr = super::lock().process_heap.alloc(&mut ctx.memory, n.max(1) as u32);
+        if addr == 0 {
+            return 0;
+        }
+        ctx.memory[addr..][..n].copy_from_slice(&data[start..start + n]);
+        VIEWS.lock().unwrap().get_or_insert_with(Default::default).insert(addr, h_map);
+        addr
+    }
+
+    pub fn unmap(ctx: &mut runtime::Context, addr: u32) -> u32 {
+        if VIEWS.lock().unwrap().as_mut().and_then(|v| v.remove(&addr)).is_some() {
+            super::lock().process_heap.free(&mut ctx.memory, addr);
+            1
+        } else {
+            0
+        }
+    }
+
+    /// CloseHandle on a mapping handle.
+    pub fn close(h: u32) -> bool {
+        MAPS.lock().unwrap().as_mut().and_then(|m| m.remove(&h)).is_some()
     }
 }

@@ -197,6 +197,15 @@ mod imp {
 
     /// Add a file to the in-memory filesystem. The page calls this for each
     /// file of the program's data before starting it.
+    /// Placeholder content of a file fetched lazily (see `open`).
+    pub const LAZY_MARKER: &[u8] = b"\0rr-lazy-file\0";
+
+    #[wasm_bindgen::prelude::wasm_bindgen]
+    extern "C" {
+        /// Defined by the page's worker scripts: synchronous fetch of a mounted path.
+        fn rr_fetch_sync(path: &str) -> Option<Vec<u8>>;
+    }
+
     pub fn mount(path: &str, data: Vec<u8>) {
         let path = normalize(Path::new(path));
         fs().as_mut().unwrap().files.insert(path, data);
@@ -291,7 +300,19 @@ mod imp {
 
     pub fn open(path: &Path, options: OpenOptions) -> Result<File> {
         let path = normalize(path);
-        let existing = fs().as_ref().unwrap().files.get(&path).cloned();
+        let mut existing = fs().as_ref().unwrap().files.get(&path).cloned();
+        // Road Rash evaluation: large files are mounted as a placeholder and
+        // fetched from the page's server on first open.
+        if existing.as_deref() == Some(LAZY_MARKER) {
+            match rr_fetch_sync(&path) {
+                Some(data) => {
+                    log::info!("fs: fetched {path} on demand ({} bytes)", data.len());
+                    fs().as_mut().unwrap().files.insert(path.clone(), data.clone());
+                    existing = Some(data);
+                }
+                None => return Err(not_found()),
+            }
+        }
         if existing.is_some() && options.create_new {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,

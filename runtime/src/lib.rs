@@ -11,6 +11,7 @@ mod segofs;
 
 pub use exe::EXEData;
 pub use flags::Flags;
+pub use fpu::{f64_to_f80, f80_to_f64};
 pub use machine::{BlockCache, CPU, Context};
 pub use mapping::{Mapping, Mappings, round_to_page};
 pub use memory::Memory;

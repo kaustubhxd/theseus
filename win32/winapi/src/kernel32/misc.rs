@@ -29,9 +29,16 @@ pub fn SetEnvironmentVariableA(_ctx: &mut Context, _lpName: Ptr<u8>, _lpValue: P
 
 #[win32_derive::dllexport]
 pub fn ExitThread(_ctx: &mut Context, dwExitCode: u32) {
-    // Wrong for a thread from CreateThread, which should end just that thread.
-    // Loud because getting here from a worker kills the process.
-    log::warn!("ExitThread({dwExitCode}): exiting the whole process");
+    if _ctx.thread_id != 1 {
+        // Road Rash evaluation: a CreateThread thread ends just itself. There's
+        // no way to unwind out of the translated code, so park it for good.
+        log::warn!("ExitThread({dwExitCode}) on thread {}: parking it", _ctx.thread_id);
+        crate::kernel32::rr_threads::mark_finished(_ctx.thread_id);
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
+    }
+    log::warn!("ExitThread({dwExitCode}) on the main thread: exiting the process");
     std::process::exit(dwExitCode as i32);
 }
 

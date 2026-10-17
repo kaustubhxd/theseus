@@ -143,8 +143,8 @@ pub fn mciSendCommandA(
     _dwParam1: u32,
     _dwParam2: u32,
 ) -> u32 {
-    // CD audio etc.; pretend success and play nothing.
-    crate::stub!(0)
+    // Road Rash evaluation: the avivideo device (cut-scenes).
+    super::rr_video::send_command(_ctx, _mciId, _uMsg, _dwParam1, _dwParam2)
 }
 
 #[win32_derive::dllexport]

@@ -22,6 +22,21 @@ pub struct Event {
 #[win32_derive::dllexport]
 pub fn WaitForSingleObject(_ctx: &mut Context, hHandle: HANDLE, dwMilliseconds: u32) -> u32 /* WAIT_EVENT */
 {
+    // Road Rash evaluation: thread handles (CreateThread returns the small
+    // thread id) are signalled once the thread has exited.
+    let raw = hHandle.to_raw();
+    if raw > 1 && raw < 0x100 {
+        let start = host::host().time();
+        loop {
+            if rr_threads::finished(raw) {
+                return 0; // WAIT_OBJECT_0
+            }
+            if dwMilliseconds != u32::MAX && host::host().time().wrapping_sub(start) >= dwMilliseconds {
+                return 0x102; // WAIT_TIMEOUT
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
     let event = {
         let kernel32 = lock();
         let Object::Event(event) = kernel32.objects.get(hHandle).unwrap() else {
@@ -31,13 +46,15 @@ pub fn WaitForSingleObject(_ctx: &mut Context, hHandle: HANDLE, dwMilliseconds: 
     };
 
     let mut signaled = event.signaled.lock().unwrap();
+    // Road Rash evaluation: honour finite timeouts (it used to wait forever).
+    let start = host::host().time();
     while !*signaled {
+        if dwMilliseconds != u32::MAX && host::host().time().wrapping_sub(start) >= dwMilliseconds {
+            return 0x102; // WAIT_TIMEOUT
+        }
         signaled = event
             .cond
-            .wait_timeout(
-                signaled,
-                std::time::Duration::from_millis(dwMilliseconds as u64),
-            )
+            .wait_timeout(signaled, std::time::Duration::from_millis((dwMilliseconds as u64).min(50)))
             .unwrap()
             .0;
     }
@@ -104,4 +121,17 @@ pub fn SetEvent(_ctx: &mut Context, hEvent: HANDLE) -> bool {
     assert!(!event.manual_reset);
     event.cond.notify_one();
     true
+}
+
+/// Road Rash evaluation: which CreateThread threads have exited.
+pub mod rr_threads {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    static DONE: Mutex<Option<HashSet<u32>>> = Mutex::new(None);
+    pub fn mark_finished(id: u32) {
+        DONE.lock().unwrap().get_or_insert_with(Default::default).insert(id);
+    }
+    pub fn finished(id: u32) -> bool {
+        DONE.lock().unwrap().as_ref().is_some_and(|d| d.contains(&id))
+    }
 }

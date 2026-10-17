@@ -145,6 +145,11 @@ pub struct Input {
     dik: [u8; 256],
     /// Keys pressed since GetAsyncKeyState last reported them, by VK_* code.
     async_pressed: [bool; 256],
+    /// Road Rash evaluation: for each VK_* code the game saw go down, the
+    /// physical key behind it before the WASD remap (see KeyMessage::text_vkey).
+    text_keys: [u8; 256],
+    /// Physical (unremapped) keys held, by VK_* code, for typed shift state.
+    text_down: [bool; 256],
     keyboard_buffer: EventBuffer,
     mouse_buffer: EventBuffer,
     next_sequence: u32,
@@ -157,6 +162,8 @@ impl Default for Input {
             keys: [0; 256],
             dik: [0; 256],
             async_pressed: [false; 256],
+            text_keys: [0; 256],
+            text_down: [false; 256],
             keyboard_buffer: Default::default(),
             mouse_buffer: Default::default(),
             next_sequence: 0,
@@ -231,6 +238,13 @@ impl Input {
     }
 
     pub fn on_key(&mut self, key: &host::KeyMessage, down: bool) {
+        self.text_down[key.text_vkey as usize] = down;
+        if down {
+            self.text_keys[key.vkey as usize] = key.text_vkey;
+            if let Some((generic, _)) = key_sides(key.vkey) {
+                self.text_keys[generic as usize] = key.text_vkey;
+            }
+        }
         self.set_key(key.vkey, down, !key.repeat);
         if let Some((generic, other)) = key_sides(key.vkey) {
             // The generic entry stays down while either side is held.
@@ -393,7 +407,12 @@ fn shifted(shift: bool, plain: u8, shifted: u8) -> u8 {
 /// text. Used by TranslateMessage.
 pub fn char_for_key(vkey: u8) -> Option<u8> {
     let input = state().input.borrow();
-    let shift = input.key_down(0x10);
+    // Road Rash evaluation: type the physical key, not its WASD stand-in.
+    let vkey = match input.text_keys[vkey as usize] {
+        0 => vkey,
+        text => text,
+    };
+    let shift = input.key_down(0x10) || [0x10, 0xa0, 0xa1].iter().any(|&k| input.text_down[k]);
     let caps = input.key_state(0x14) & KEY_TOGGLED != 0;
     vkey_to_char(vkey, shift, caps)
 }

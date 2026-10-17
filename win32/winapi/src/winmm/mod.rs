@@ -10,6 +10,8 @@ mod misc;
 pub use misc::*;
 mod mmio;
 pub use mmio::*;
+pub mod rr_midi;
+pub mod rr_video;
 
 #[derive(Default)]
 pub struct State {
@@ -60,3 +62,7 @@ fn winmm_main(ctx: &mut Context) {
         ctx.call32_x86(func, vec![timer_id, 0, user_data, 0, 0]);
     }
 }
+
+#[path = "../rr_stubs_winmm.rs"]
+mod rr_stubs;
+pub use rr_stubs::*;

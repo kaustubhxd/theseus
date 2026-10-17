@@ -142,14 +142,53 @@ pub fn CreateWindowExA(
     _hInstance: HINSTANCE,
     _lpParam: Ptr<()>,
 ) -> HWND {
+    use super::rr_windows;
     let name = ctx.memory.read_str(lpWindowName.addr);
-    state().create_window(CreateWindowArgs {
+    let class = rr_windows::class_name(ctx, _lpClassName.addr);
+    let cs = |hwnd_parent: u32| {
+        [
+            _lpParam.addr,
+            _hInstance,
+            _hMenu,
+            hwnd_parent,
+            nHeight.value().unwrap_or(0),
+            nWidth.value().unwrap_or(0),
+            Y as u32,
+            X as u32,
+            _dwStyle,
+            lpWindowName.addr,
+            _lpClassName.addr,
+            _dwExStyle,
+        ]
+    };
+    // Road Rash evaluation: child windows (or any window after the first) are
+    // bookkeeping-only windows with their own HWND and class.
+    if _dwStyle & 0x4000_0000 != 0 || state().window.borrow().is_some() {
+        let hwnd = rr_windows::new_child_hwnd();
+        let (w, h) = (nWidth.value().unwrap_or(0) as i32, nHeight.value().unwrap_or(0) as i32);
+        if let Some(wndproc) = rr_windows::add_window(hwnd, &class, _hWndParent.to_raw(), [X, Y, X + w, Y + h], _dwStyle) {
+            rr_windows::send_create(ctx, wndproc, hwnd, cs(_hWndParent.to_raw()));
+        }
+        return HWND::from_raw(hwnd);
+    }
+    let hwnd = state().create_window(CreateWindowArgs {
         name: name.into(),
         x: X,
         y: Y,
         width: nWidth.value(),
         height: nHeight.value(),
-    })
+    });
+    let (w, h) = (nWidth.value().unwrap_or(640) as i32, nHeight.value().unwrap_or(480) as i32);
+    if let Some(wndproc) = rr_windows::add_window(hwnd.to_raw(), &class, 0, [0, 0, w, h], _dwStyle) {
+        // The single-window code paths (BeginPaint etc.) use the main window's class.
+        let bg = rr_windows::RR.with_borrow(|rr| {
+            let w = rr.windows.get(&hwnd.to_raw()).unwrap();
+            rr.classes[w.class].class.background.clone()
+        });
+        *state().wndclass.borrow_mut() = Some(WndClass { wndproc, background: bg });
+        rr_windows::send_create(ctx, wndproc, hwnd.to_raw(), cs(0));
+    }
+    hwnd
 }
 
 #[win32_derive::dllexport]
@@ -180,6 +219,9 @@ pub fn CreateWindowExW(
 
 #[win32_derive::dllexport]
 pub fn DestroyWindow(_ctx: &mut Context, _hWnd: HWND) -> bool {
+    if _hWnd.to_raw() >= 0x100 && super::rr_windows::destroy_window(_hWnd.to_raw()) {
+        return true; // Road Rash evaluation: tracked (child/popup) window
+    }
     stub!(true)
 }
 
@@ -209,6 +251,13 @@ pub fn MoveWindow(
     nHeight: i32,
     bRepaint: bool,
 ) -> bool {
+    if _hWnd.to_raw() >= 0x100 && super::rr_windows::move_window(_hWnd.to_raw(), X, Y, nWidth, nHeight) {
+        return true; // Road Rash evaluation: child window
+    }
+    if _hWnd.is_null() || nWidth <= 0 || nHeight <= 0 {
+        log::warn!("rr: MoveWindow on null window or zero size ignored");
+        return false;
+    }
     let state = state();
     let window = state.window.borrow();
     let mut window = window.as_ref().unwrap().borrow_mut();
@@ -267,7 +316,20 @@ pub fn DefWindowProcW(
 
 #[win32_derive::dllexport]
 pub fn SetFocus(_ctx: &mut Context, _hWnd: HWND) -> HWND {
-    stub!(HWND::null())
+    // Road Rash evaluation: track focus so keystrokes reach the focused
+    // control, and tell both windows (controls redraw their highlight).
+    use super::rr_windows;
+    let new = _hWnd.to_raw();
+    let old = rr_windows::set_focus(new);
+    if old != new {
+        if let Some(p) = rr_windows::wndproc_for(old) {
+            rr_windows::call_wndproc(_ctx, p, old, 0x0008 /* WM_KILLFOCUS */, new, 0);
+        }
+        if let Some(p) = rr_windows::wndproc_for(new) {
+            rr_windows::call_wndproc(_ctx, p, new, 0x0007 /* WM_SETFOCUS */, old, 0);
+        }
+    }
+    HWND::from_raw(old)
 }
 
 #[repr(C)]
@@ -336,7 +398,17 @@ impl COLOR {
 
 #[win32_derive::dllexport]
 pub fn RegisterClassA(ctx: &mut Context, lpWndClass: Ptr<WNDCLASS>) -> u16 {
-    RegisterClassW(ctx, lpWndClass)
+    // Road Rash evaluation: remember every class by name, not just the last one.
+    let wndclass = lpWndClass.read(&ctx.memory).unwrap();
+    let name = super::rr_windows::class_name(ctx, wndclass.lpszClassName);
+    let ret = RegisterClassW(ctx, lpWndClass);
+    let last = state().wndclass.borrow();
+    let last = last.as_ref().unwrap();
+    super::rr_windows::register(
+        name,
+        WndClass { wndproc: last.wndproc, background: last.background.clone() },
+    );
+    ret
 }
 
 #[win32_derive::dllexport]
@@ -416,7 +488,10 @@ pub fn EndPaint(ctx: &mut Context, _hWnd: HWND, lpPaint: Ptr<PAINTSTRUCT>) -> bo
     let paint = lpPaint.read(&ctx.memory).unwrap();
     gdi32::lock().release_dc(paint.hdc);
     window.dirty = false;
-    window.flush(ctx);
+    // Road Rash evaluation: don't paint the (empty) GDI layer over DirectDraw.
+    if !super::rr_windows::DDRAW_OWNS_WINDOW.load(std::sync::atomic::Ordering::Relaxed) {
+        window.flush(ctx);
+    }
     true
 }
 
@@ -497,6 +572,9 @@ pub fn SetWindowTextA(_ctx: &mut Context, _hWnd: HWND, _lpString: Ptr<u8>) -> bo
 
 #[win32_derive::dllexport]
 pub fn EnableWindow(_ctx: &mut Context, _hWnd: HWND, _bEnable: bool) -> bool {
+    if let Some(was_disabled) = super::rr_windows::enable_window(_hWnd.to_raw(), _bEnable) {
+        return was_disabled; // Road Rash evaluation: tracked child window
+    }
     stub!(false)
 }
 

@@ -25,3 +25,7 @@ pub use state::{Lock, State, init_state, lock};
 pub use strings::*;
 pub use thread::*;
 pub use time::*;
+
+#[path = "../rr_stubs_kernel32.rs"]
+mod rr_stubs;
+pub use rr_stubs::*;

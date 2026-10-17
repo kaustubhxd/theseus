@@ -283,11 +283,26 @@ impl Surface {
         let Target::Window(window) = &self.target else {
             return;
         };
-        // We have no texture of our own; borrow the back buffer's.
-        let Some(back) = self.attached.clone() else {
+        let Some(pixels) = self.to_rgba(mem, &self.palette) else {
             return;
         };
-        let Some(pixels) = self.to_rgba(mem, &self.palette) else {
+        rr_frame(&pixels, self.width, self.height);
+        // We have no texture of our own; borrow the back buffer's.
+        let Some(back) = self.attached.clone() else {
+            // Road Rash evaluation: a primary without a flip chain is drawn to
+            // directly; give it a host texture of its own and show that.
+            thread_local! {
+                static RR_TEX: RefCell<Option<(u32, u32, host::Surface)>> = RefCell::new(None);
+            }
+            let (w, h) = (self.width, self.height);
+            RR_TEX.with_borrow_mut(|tex| {
+                if !matches!(tex, Some((tw, th, _)) if *tw == w && *th == h) {
+                    *tex = Some((w, h, window.borrow_mut().host.create_surface(w, h)));
+                }
+                let (_, _, texture) = tex.as_mut().unwrap();
+                texture.set_pixels(&pixels, w * 4);
+                window.borrow_mut().host.render(texture);
+            });
             return;
         };
         let mut back = back.borrow_mut();
@@ -305,6 +320,14 @@ impl Surface {
         };
 
         let mut back = self.attached.as_ref().unwrap().borrow_mut();
+        // Road Rash evaluation: count/dump flipped frames too.
+        if std::env::var_os("RR_DUMP_DIR").is_some() || std::env::var_os("RR_DUMP_LATEST").is_some() {
+            if let Some(px) = back.to_rgba(mem, &self.palette) {
+                rr_frame(&px, back.width, back.height);
+            }
+        } else {
+            rr_frame(&[], back.width, back.height);
+        }
         if self.palette.is_some() {
             back.update_texture(mem, &self.palette);
         }
@@ -319,6 +342,33 @@ impl Surface {
 
 pub struct Palette {
     pub entries: Vec<PALETTEENTRY>,
+}
+
+/// Road Rash evaluation: pixel format for a given surface depth (RGB565 for 16-bit).
+pub fn pixel_format_for(bytes_per_pixel: u32) -> DDPIXELFORMAT {
+    match bytes_per_pixel {
+        1 => DDPIXELFORMAT {
+            dwSize: std::mem::size_of::<DDPIXELFORMAT>() as u32,
+            dwFlags: 0x40 | 0x20, // DDPF_RGB | DDPF_PALETTEINDEXED8
+            dwFourCC: 0,
+            dwRGBBitCount: 8,
+            dwRBitMask: 0,
+            dwGBitMask: 0,
+            dwBBitMask: 0,
+            dwRGBAlphaBitMask: 0,
+        },
+        2 => DDPIXELFORMAT {
+            dwSize: std::mem::size_of::<DDPIXELFORMAT>() as u32,
+            dwFlags: 0x40,
+            dwFourCC: 0,
+            dwRGBBitCount: 16,
+            dwRBitMask: 0xF800,
+            dwGBitMask: 0x07E0,
+            dwBBitMask: 0x001F,
+            dwRGBAlphaBitMask: 0,
+        },
+        _ => get_pixel_format(),
+    }
 }
 
 pub fn get_pixel_format() -> DDPIXELFORMAT {
@@ -462,6 +512,19 @@ pub fn blit_copy(
             }
         }
     }
+    if let Ok(dir) = std::env::var("RR_DUMP_DIR") {
+        // Road Rash evaluation: dump the first few blit destinations.
+        use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+        static K: AtomicU32 = AtomicU32::new(0);
+        let k = K.fetch_add(1, Relaxed);
+        if k < 8 {
+            if let Some(px) = dst.to_rgba(&ctx.memory, &dst.palette) {
+                let mut out = format!("P6\n{} {}\n255\n", dst.width, dst.height).into_bytes();
+                for p in px.chunks_exact(4) { out.extend_from_slice(&p[..3]); }
+                let _ = std::fs::write(format!("{dir}/bltfast{k}_{dst_ptr:x}.ppm"), out);
+            }
+        }
+    }
     dst.present(&mut ctx.memory);
 }
 
@@ -509,6 +572,12 @@ pub fn blt(
             let width_bytes = ((rect.right - rect.left).max(0) as u32 * bpp) as usize;
             match bpp {
                 1 => ctx.memory[start..][..width_bytes].fill(color as u8),
+                // Road Rash evaluation: 16-bit fills (the game clears before videos).
+                2 => {
+                    for x in 0..(rect.right - rect.left).max(0) as u32 {
+                        ctx.memory.write::<u16>(start + x * 2, color as u16);
+                    }
+                }
                 4 => {
                     for x in 0..(rect.right - rect.left).max(0) as u32 {
                         ctx.memory.write::<u32>(start + x * 4, color);
@@ -641,4 +710,41 @@ pub fn get_color_key(ctx: &mut Context, this: u32, dwFlags: u32, lpDDColorKey: u
     ctx.memory.write::<u32>(lpDDColorKey, key.low);
     ctx.memory.write::<u32>(lpDDColorKey + 4, key.high);
     DD::OK
+}
+
+/// Road Rash evaluation: count presented frames (logged once per second) and,
+/// if RR_DUMP_DIR is set, write every 30th frame as a PPM.
+fn rr_frame(rgba: &[u8], w: u32, h: u32) {
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
+    static N: AtomicU32 = AtomicU32::new(0);
+    static SEC_N: AtomicU32 = AtomicU32::new(0);
+    static SEC_T: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Relaxed);
+    let now = host::host().time() as u64 + 1; // (+1: 0 means "not started")
+    let t0 = SEC_T.load(Relaxed);
+    if t0 == 0 { SEC_T.store(now, Relaxed); }
+    let c = SEC_N.fetch_add(1, Relaxed) + 1;
+    if t0 != 0 && now - t0 >= 1000 {
+        log::warn!("rr-fps: {:.1} presents/s (total {})", c as f64 * 1000.0 / (now - t0) as f64, n + 1);
+        SEC_T.store(now, Relaxed);
+        SEC_N.store(0, Relaxed);
+    }
+    if let Ok(path) = std::env::var("RR_DUMP_LATEST") {
+        if !rgba.is_empty() {
+            let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+            for px in rgba.chunks_exact(4) { out.extend_from_slice(&px[..3]); }
+            let _ = std::fs::write(&path, out);
+        }
+    }
+    if let Ok(dir) = std::env::var("RR_DUMP_DIR") {
+        static LAST_DUMP: AtomicU64 = AtomicU64::new(0);
+        static DUMPS: AtomicU32 = AtomicU32::new(0);
+        let every: u64 = std::env::var("RR_DUMP_EVERY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(3000);
+        if (n == 0 || now - LAST_DUMP.load(Relaxed) >= every) && DUMPS.fetch_add(1, Relaxed) < 200 {
+            LAST_DUMP.store(now, Relaxed);
+            let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+            for px in rgba.chunks_exact(4) { out.extend_from_slice(&px[..3]); }
+            let _ = std::fs::write(format!("{dir}/frame{n:05}.ppm"), out);
+        }
+    }
 }

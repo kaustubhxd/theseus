@@ -65,7 +65,7 @@ impl<'a> CodeGen<'a> {
             Enter => {
                 assert!(instr.op1_kind() == iced_x86::OpKind::Immediate8_2nd);
                 let op1 = instr.immediate8_2nd();
-                self.line(format!("ctx.enter({}, {:x});", self.get_op(instr, 0), op1));
+                self.line(format!("ctx.enter({}, {:#x});", self.get_op(instr, 0), op1));
             }
 
             Xchg => {

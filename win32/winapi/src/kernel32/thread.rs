@@ -75,10 +75,18 @@ impl kernel32::State {
         };
         self.next_thread_id += 1;
         self.init_thread(&mut new_ctx, teb(ctx).Peb);
+        #[cfg(not(target_family = "wasm"))]
         std::thread::Builder::new()
             .name(name)
             .spawn(move || proc(&mut new_ctx))
             .unwrap();
+        // Road Rash evaluation: std::thread::spawn isn't available on
+        // wasm32-unknown-unknown; start a Web Worker on the shared memory instead.
+        #[cfg(target_family = "wasm")]
+        {
+            log::info!("spawning wasm thread {name}");
+            host::spawn(Box::new(move || proc(&mut new_ctx)));
+        }
     }
 
     // shared between the process initial thread and create_thread
@@ -114,10 +122,15 @@ pub fn CreateThread(
 ) -> HANDLE {
     let mut lock = kernel32::lock();
     let id = lock.next_thread_id;
+    // Road Rash evaluation: report the thread id (the game posts messages to it).
+    if _lpThreadId.addr != 0 {
+        ctx.memory.write::<u32>(_lpThreadId.addr, id);
+    }
     let name = format!("thread {}@{:x}", id, lpStartAddress.addr);
     lock.create_thread(ctx, name, move |ctx| {
         let f = ctx.indirect32(lpStartAddress.addr);
         ctx.call32_x86(f, vec![lpParameter.addr]);
+        crate::kernel32::rr_threads::mark_finished(ctx.thread_id);
     });
     HANDLE::from_raw(id)
 }

@@ -5,6 +5,7 @@ mod misc;
 mod rect;
 mod resource;
 mod window;
+pub mod rr_windows;
 
 use std::{
     cell::{OnceCell, RefCell},
@@ -50,3 +51,7 @@ pub fn state() -> &'static State {
         input: Default::default(),
     })
 }
+
+#[path = "../rr_stubs_user32.rs"]
+mod rr_stubs;
+pub use rr_stubs::*;

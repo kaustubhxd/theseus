@@ -151,3 +151,42 @@ mod tests {
         assert!(Flags::from_bits_retain(ah).contains(Flags::PF));
     }
 }
+
+/// Convert an x87 80-bit extended value (little-endian bytes) to f64 (lossy).
+pub fn f80_to_f64(b: [u8; 10]) -> f64 {
+    let mant = u64::from_le_bytes(b[0..8].try_into().unwrap());
+    let se = u16::from_le_bytes([b[8], b[9]]);
+    let sign = if se & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exp = (se & 0x7fff) as i32;
+    if exp == 0 && mant == 0 {
+        return sign * 0.0;
+    }
+    if exp == 0x7fff {
+        return if mant << 1 == 0 { sign * f64::INFINITY } else { f64::NAN };
+    }
+    sign * (mant as f64) * 2f64.powi(exp - 16383 - 63)
+}
+
+/// Convert f64 to an x87 80-bit extended value (little-endian bytes).
+pub fn f64_to_f80(v: f64) -> [u8; 10] {
+    let bits = v.to_bits();
+    let sign = ((bits >> 63) as u16) << 15;
+    let exp = ((bits >> 52) & 0x7ff) as i32;
+    let frac = bits & ((1u64 << 52) - 1);
+    let (e, m): (u16, u64) = if exp == 0 && frac == 0 {
+        (0, 0)
+    } else if exp == 0x7ff {
+        (0x7fff, (1u64 << 63) | (frac << 11))
+    } else if exp == 0 {
+        // denormal f64: normalize
+        let lz = frac.leading_zeros() as i32; // >= 12
+        let m = frac << lz;
+        ((1 - 1023 + 16383 - (lz - 11)) as u16, m)
+    } else {
+        ((exp - 1023 + 16383) as u16, (1u64 << 63) | (frac << 11))
+    };
+    let mut out = [0u8; 10];
+    out[0..8].copy_from_slice(&m.to_le_bytes());
+    out[8..10].copy_from_slice(&(sign | e).to_le_bytes());
+    out
+}

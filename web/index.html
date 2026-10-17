@@ -1,13 +1,349 @@
 <!doctype html>
+<meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
+    /* Road Rash evaluation: the game fills the window (4:3, centred, crisp pixels). */
+    html, body {
+        margin: 0;
+        height: 100%;
+        background: #000;
+        overflow: hidden;
+    }
     .window {
-        border: solid 1px black;
         position: absolute;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        width: min(100vw, calc(100vh * 4 / 3));
+        height: min(100vh, calc(100vw * 3 / 4));
     }
     canvas {
-        image-rendering: crisp-edges;
+        image-rendering: pixelated;
     }
+    #console {
+        display: none;
+    }
+
+    /* ---- side panels (Road Rash fonts and art) ---- */
+    /* The game's fonts (TEXT/*.DLL) are loaded by panels.ts. */
+    /* ---- loading screen (progress.ts): the game's title art, fonts, meter ---- */
+    .rr-loading {
+        position: fixed;
+        inset: 0;
+        z-index: 9;
+        background: #000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: opacity .6s;
+    }
+    .rr-loading.rr-gone { opacity: 0; pointer-events: none; }
+    .rr-lart {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        width: min(100vw, calc(100vh * 4 / 3));
+        height: min(100vh, calc(100vw * 3 / 4));
+        background: center / cover no-repeat;
+        opacity: 0;
+        transition: opacity .8s;
+        image-rendering: pixelated;
+    }
+    .rr-lart.rr-on { opacity: 1; }
+    .rr-lband {
+        position: absolute;
+        left: 50%;
+        bottom: 0;
+        transform: translateX(-50%);
+        width: min(100vw, calc(100vh * 4 / 3));
+        box-sizing: border-box;
+        padding: 14px 4% 16px;
+        background: linear-gradient(180deg, rgba(10, 8, 20, 0), rgba(10, 8, 20, .82) 22%, rgba(10, 8, 20, .92));
+        font-family: "Futura RR", "Futura", sans-serif;
+        color: #f4f0e6;
+    }
+    .rr-lrow { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+    .rr-llabel {
+        font-weight: bold;
+        font-size: clamp(16px, 2.4vw, 26px);
+        color: #f7e26b;
+        text-shadow: 2px 2px 0 #000;
+    }
+    .rr-llabel::before { content: "➔ "; }
+    .rr-lbytes { font-size: clamp(13px, 1.6vw, 18px); color: #cfc6e6; text-shadow: 1px 1px 0 #000; }
+    /* Like the in-race damage meter: segmented green to yellow to red. */
+    .rr-meter {
+        height: clamp(12px, 1.6vw, 18px);
+        padding: 2px;
+        background: #000;
+        border: 2px solid #5a5068;
+    }
+    .rr-meterfill {
+        height: 100%;
+        width: 0;
+        background:
+            repeating-linear-gradient(90deg, transparent 0 14px, rgba(0, 0, 0, .55) 14px 17px),
+            linear-gradient(90deg, #2fa83a, #8fcf3a 45%, #e8d23c 70%, #e8442a);
+        transition: width .15s;
+    }
+    .rr-meterfill.rr-indet { width: 25%; animation: rr-slide 1s ease-in-out infinite alternate; }
+    @keyframes rr-slide { from { margin-left: 0; } to { margin-left: 75%; } }
+    .rr-ltip {
+        display: flex;
+        gap: 12px;
+        align-items: baseline;
+        justify-content: space-between;
+        margin-top: 10px;
+        font-size: clamp(13px, 1.7vw, 19px);
+        text-shadow: 1px 1px 0 #000;
+    }
+    .rr-lwho {
+        flex: none;
+        font-family: "Badloc", "Futura", sans-serif;
+        font-size: clamp(18px, 2.4vw, 28px);
+        color: #ff6a2a;
+        text-shadow: 2px 2px 0 #000;
+    }
+
+    /* ---- password screen: Road Rash look without the game's assets (they're
+       still encrypted at this point): asphalt, road stripes, condensed Futura ---- */
+    body:has(.rr-unlock) {
+        background:
+            repeating-linear-gradient(180deg, #f7e26b 0 60px, transparent 60px 120px) 50% 0 / 10px 100% no-repeat,
+            radial-gradient(ellipse at 50% 120%, #3a2a55 0%, #120d1d 55%, #050308 100%);
+    }
+    .rr-unlock {
+        position: fixed;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 10;
+        width: min(380px, 86vw);
+        padding: 26px 30px 28px;
+        background: rgba(10, 8, 20, .9);
+        border-top: 4px solid #ff6a2a;
+        box-shadow: 0 0 0 1px #3a3150, 0 20px 60px rgba(0, 0, 0, .7), 0 0 50px rgba(255, 106, 42, .15);
+        font-family: "Futura", "Avenir Next Condensed", sans-serif;
+        color: #f4f0e6;
+    }
+    .rr-unlock h1 {
+        margin: 0 0 4px;
+        font-family: "Futura Condensed ExtraBold", "Futura", "Impact", sans-serif;
+        font-stretch: condensed;
+        font-weight: 800;
+        font-size: 54px;
+        line-height: 1;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        color: #e8241a;
+        transform: skewX(-8deg);
+        text-shadow: 3px 3px 0 #000, -1px -1px 0 #000, 0 0 18px rgba(232, 36, 26, .45);
+    }
+    .rr-unlock h1::after {
+        content: "Restroom attendant: password, please.";
+        display: block;
+        margin-top: 8px;
+        font-family: "Futura", sans-serif;
+        font-stretch: normal;
+        font-weight: normal;
+        font-size: 15px;
+        letter-spacing: 0;
+        text-transform: none;
+        color: #cfc6e6;
+        text-shadow: none;
+        transform: skewX(8deg);
+    }
+    .rr-unlock .rr-err { color: #ff8a6a; margin: 10px 0 8px; min-height: 1.2em; font-size: 15px; }
+    .rr-unlock input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 12px;
+        margin-bottom: 14px;
+        font: 18px "Futura", sans-serif;
+        background: #000;
+        color: #f7e26b;
+        border: 2px solid #5a5068;
+        outline: none;
+    }
+    .rr-unlock input:focus { border-color: #f7e26b; }
+    .rr-unlock button {
+        width: 100%;
+        padding: 12px;
+        font: bold 20px "Futura", sans-serif;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        background: linear-gradient(180deg, #ff8a3a, #e8541a);
+        color: #120d1d;
+        border: 0;
+        border-bottom: 4px solid #8a2e0a;
+        cursor: pointer;
+    }
+    .rr-unlock button::after { content: "  ➔"; }
+    .rr-unlock button:active { transform: translateY(2px); border-bottom-width: 2px; }
+
+    /* ---- side panels (panels.ts; Road Rash fonts and art) ---- */
+    .rr-panel {
+        position: absolute;
+        top: 0;
+        height: 100%;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        box-sizing: border-box;
+        padding: 0 calc(16px * var(--scale, 1));
+        font-family: "Futura RR", "Futura", "Arial Narrow", sans-serif;
+        color: #f4f0e6;
+        user-select: none;
+    }
+    .rr-left { left: 0; }
+    .rr-right { right: 0; }
+    .rr-card {
+        width: 100%;
+        max-width: calc(300px * var(--scale, 1));
+        background: linear-gradient(180deg, rgba(40, 32, 60, .78), rgba(10, 8, 20, .88));
+        border: 1px solid rgba(255, 106, 42, .35);
+        border-left: 4px solid #ff6a2a;
+        box-shadow: 0 0 40px rgba(110, 60, 200, .25);
+        padding: calc(18px * var(--scale, 1)) calc(18px * var(--scale, 1)) calc(14px * var(--scale, 1));
+    }
+    .rr-title {
+        font-family: "Badloc", sans-serif;
+        font-size: calc(46px * var(--scale, 1));
+        color: #ff6a2a;
+        line-height: 1;
+        text-shadow: 3px 3px 0 #000;
+        margin-bottom: calc(6px * var(--scale, 1));
+    }
+    .rr-section {
+        font-family: "Futura RR", sans-serif;
+        font-weight: bold;
+        font-size: calc(19px * var(--scale, 1));
+        color: #f7e26b;
+        text-transform: uppercase;
+        letter-spacing: .06em;
+        margin: calc(12px * var(--scale, 1)) 0 calc(4px * var(--scale, 1));
+    }
+    .rr-section::before { content: "➔ "; color: #f7e26b; }
+    .rr-row {
+        display: flex;
+        align-items: center;
+        gap: calc(10px * var(--scale, 1));
+        padding: calc(4px * var(--scale, 1)) calc(6px * var(--scale, 1));
+        background: rgba(0, 0, 0, .35);
+        margin: calc(3px * var(--scale, 1)) 0;
+    }
+    .rr-keys { display: flex; gap: 4px; flex: none; min-width: calc(60px * var(--scale, 1)); }
+    .rr-label { font-size: calc(19px * var(--scale, 1)); text-shadow: 1px 1px 0 #000; }
+    kbd {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: calc(26px * var(--scale, 1));
+        height: calc(26px * var(--scale, 1));
+        padding: 0 calc(5px * var(--scale, 1));
+        box-sizing: border-box;
+        font-family: "Futura RR", sans-serif;
+        font-weight: bold;
+        font-size: calc(16px * var(--scale, 1));
+        color: #1a1420;
+        background: linear-gradient(180deg, #fff6d8, #d9c99a);
+        border-bottom: 3px solid #8a7a52;
+        border-radius: 4px;
+    }
+    kbd.rr-wide { font-size: calc(13px * var(--scale, 1)); }
+    .rr-foot {
+        margin-top: calc(12px * var(--scale, 1));
+        font-size: calc(13px * var(--scale, 1));
+        color: #a99cc7;
+    }
+    .rr-stack { width: 100%; max-width: calc(300px * var(--scale, 1)); }
+    .rr-stack .rr-title { text-align: right; margin-bottom: calc(10px * var(--scale, 1)); }
+    .rr-portrait {
+        position: relative;
+        width: 100%;
+        aspect-ratio: 3 / 4;
+        overflow: hidden;
+        border: 1px solid rgba(255, 106, 42, .35);
+        border-right: 4px solid #ff6a2a;
+        box-shadow: 0 0 40px rgba(110, 60, 200, .25);
+        background: #000;
+    }
+    .rr-portrait img {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        object-position: 38% 30%;
+        opacity: 0;
+        transition: opacity 1.2s ease;
+    }
+    .rr-portrait img.rr-on { opacity: 1; }
+    .rr-quote {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: calc(34px * var(--scale, 1));
+        padding: calc(10px * var(--scale, 1)) calc(12px * var(--scale, 1));
+        background: rgba(0, 0, 0, .62);
+        font-size: calc(19px * var(--scale, 1));
+        line-height: 1.15;
+        text-shadow: 1px 1px 0 #000;
+    }
+    .rr-who {
+        position: absolute;
+        right: calc(10px * var(--scale, 1));
+        bottom: calc(6px * var(--scale, 1));
+        font-family: "Badloc", sans-serif;
+        font-size: calc(26px * var(--scale, 1));
+        color: #ff6a2a;
+        text-shadow: 2px 2px 0 #000;
+    }
+
+    /* In-game loading indicator (progress.ts), over the game's black screen. */
+    .rr-ghint {
+        position: fixed;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 7;
+        width: min(340px, 60vw);
+        text-align: center;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity .25s;
+    }
+    .rr-ghint.rr-on { opacity: 1; }
+    .rr-ghtitle {
+        font-family: "Badloc", "Futura", sans-serif;
+        font-size: clamp(34px, 5vw, 56px);
+        color: #ff6a2a;
+        text-shadow: 3px 3px 0 #000;
+    }
+    .rr-ghwhat {
+        min-height: 1.3em;
+        margin: 2px 0 10px;
+        font-family: "Futura RR", "Futura", sans-serif;
+        font-size: clamp(14px, 1.8vw, 19px);
+        color: #f7e26b;
+    }
+    .rr-mute {
+        position: fixed;
+        right: 12px;
+        bottom: 12px;
+        z-index: 8;
+        width: 40px;
+        height: 40px;
+        font-size: 20px;
+        line-height: 1;
+        background: rgba(10, 8, 20, .75);
+        border: 1px solid rgba(255, 106, 42, .5);
+        border-radius: 50%;
+        cursor: pointer;
+        opacity: .6;
+    }
+    .rr-mute:hover { opacity: 1; }
 </style>
-<script src="coi-serviceworker.min.js"></script>
+<script src="rr-sw-register.js"></script>
 <script type="module" src="host.js"></script>

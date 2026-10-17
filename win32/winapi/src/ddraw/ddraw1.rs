@@ -4,7 +4,7 @@ use runtime::Context;
 use zerocopy::{FromBytes, IntoBytes};
 
 use crate::{
-    ddraw::{DD, GUID, Palette, get_pixel_format, state, types::*},
+    ddraw::{DD, GUID, Palette, get_pixel_format, pixel_format_for, state, types::*},
     heap::Heap,
     kernel32, stub,
     user32::HWND,
@@ -201,8 +201,15 @@ pub mod IDirectDraw {
     }
 
     #[win32_derive::dllexport]
-    pub fn GetCaps(_ctx: &mut Context, _this: u32) -> DD {
-        todo!()
+    pub fn GetCaps(ctx: &mut Context, _this: u32, lpDDDriverCaps: u32, lpDDHELCaps: u32) -> DD {
+        // Road Rash evaluation: report no capabilities (zeroed DDCAPS, dwSize kept).
+        for p in [lpDDDriverCaps, lpDDHELCaps] {
+            if p != 0 {
+                let size = ctx.memory.read::<u32>(p);
+                ctx.memory[p + 4..p + size.max(4)].fill(0);
+            }
+        }
+        DD::OK
     }
 
     #[win32_derive::dllexport]
@@ -249,7 +256,7 @@ pub mod IDirectDraw {
 
     #[win32_derive::dllexport]
     pub fn RestoreDisplayMode(_ctx: &mut Context, _this: u32) -> DD {
-        todo!()
+        DD::OK // Road Rash evaluation: nothing to restore on the host
     }
 
     #[win32_derive::dllexport]
@@ -269,6 +276,7 @@ pub mod IDirectDraw {
             .resize(ctx, width, height);
         assert!(bpp % 8 == 0);
         ddraw.bytes_per_pixel = bpp / 8;
+        crate::user32::rr_windows::DDRAW_OWNS_WINDOW.store(true, std::sync::atomic::Ordering::Relaxed);
         stub!(DD::OK)
     }
 
@@ -472,8 +480,8 @@ pub mod IDirectDrawSurface {
     }
 
     #[win32_derive::dllexport]
-    pub fn GetBltStatus(_ctx: &mut Context, _this: u32) -> DD {
-        todo!()
+    pub fn GetBltStatus(_ctx: &mut Context, _this: u32, _dwFlags: u32) -> DD {
+        DD::OK // Road Rash evaluation: flips/blits complete immediately; surfaces never lost
     }
 
     #[win32_derive::dllexport]
@@ -499,13 +507,16 @@ pub mod IDirectDrawSurface {
     }
 
     #[win32_derive::dllexport]
-    pub fn GetDC(_ctx: &mut Context, _this: u32) -> DD {
-        todo!()
+    pub fn GetDC(ctx: &mut Context, _this: u32, lphDC: u32) -> DD {
+        // Road Rash evaluation: a DC drawing straight into the surface (see rr_text).
+        let hdc = crate::rr_text::surface_dc(_this);
+        ctx.memory.write::<u32>(lphDC, hdc);
+        DD::OK
     }
 
     #[win32_derive::dllexport]
-    pub fn GetFlipStatus(_ctx: &mut Context, _this: u32) -> DD {
-        todo!()
+    pub fn GetFlipStatus(_ctx: &mut Context, _this: u32, _dwFlags: u32) -> DD {
+        DD::OK // Road Rash evaluation: flips/blits complete immediately; surfaces never lost
     }
 
     #[win32_derive::dllexport]
@@ -519,8 +530,12 @@ pub mod IDirectDrawSurface {
     }
 
     #[win32_derive::dllexport]
-    pub fn GetPixelFormat(ctx: &mut Context, _this: u32, lpDDPixelFormat: u32) -> DD {
-        ctx.memory.write(lpDDPixelFormat, get_pixel_format());
+    pub fn GetPixelFormat(ctx: &mut Context, this: u32, lpDDPixelFormat: u32) -> DD {
+        let bpp = {
+            let surfaces = state().surf.borrow_mut();
+            surfaces.get(&this).map(|s| s.borrow().bytes_per_pixel).unwrap_or(4)
+        };
+        ctx.memory.write(lpDDPixelFormat, pixel_format_for(bpp));
         DD::OK
     }
 
@@ -542,7 +557,7 @@ pub mod IDirectDrawSurface {
                     dwRGBAlphaBitMask: 0,
                 }
             } else {
-                get_pixel_format()
+                pixel_format_for(surface.bytes_per_pixel)
             };
             DDSURFACEDESC {
                 dwSize: std::mem::size_of::<DDSURFACEDESC>() as u32,
@@ -601,13 +616,13 @@ pub mod IDirectDrawSurface {
     }
 
     #[win32_derive::dllexport]
-    pub fn ReleaseDC(_ctx: &mut Context, _this: u32) -> DD {
-        todo!()
+    pub fn ReleaseDC(_ctx: &mut Context, _this: u32, _hdc: u32) -> DD {
+        DD::OK // Road Rash evaluation stub
     }
 
     #[win32_derive::dllexport]
     pub fn Restore(_ctx: &mut Context, _this: u32) -> DD {
-        todo!()
+        DD::OK // Road Rash evaluation: flips/blits complete immediately; surfaces never lost
     }
 
     #[win32_derive::dllexport]

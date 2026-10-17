@@ -109,6 +109,9 @@ fn ascending(a: i32, b: i32) -> std::ops::RangeInclusive<i32> {
 
 #[win32_derive::dllexport]
 pub fn LineTo(ctx: &mut Context, hdc: HDC, x: i32, y: i32) -> bool {
+    if crate::rr_text::line_to(ctx, hdc.to_raw(), x, y) {
+        return true; // Road Rash evaluation: surface DC
+    }
     let mut state = gdi32::lock();
     let dc = state.dcs.get_mut(hdc).unwrap();
     let bitmap = dc.bitmap();
@@ -142,6 +145,9 @@ pub fn LineTo(ctx: &mut Context, hdc: HDC, x: i32, y: i32) -> bool {
 
 #[win32_derive::dllexport]
 pub fn MoveToEx(ctx: &mut Context, hdc: HDC, x: i32, y: i32, lppt: Ptr<POINT>) -> bool {
+    if crate::rr_text::move_to(ctx, hdc.to_raw(), x, y, lppt.addr) {
+        return true; // Road Rash evaluation: surface DC
+    }
     let mut state = gdi32::lock();
     let dc = state.dcs.get_mut(hdc).unwrap();
     dc.pos = POINT { x, y };

@@ -180,6 +180,35 @@ pub fn WaitMessage(_ctx: &mut Context) -> bool {
 }
 
 impl MessageQueue {
+    /// Road Rash evaluation: scripted key presses for automated runs, from
+    /// RR_KEYS="ms:key,ms:key" (ms since the first message poll; key = enter,
+    /// esc, space, up, down, left, right, or a hex VK like 0x41).
+    fn rr_inject(&mut self) {
+        // Road Rash evaluation: cut-scene playback and its MM_MCINOTIFY messages.
+        crate::winmm::rr_video::pump();
+        for (hwnd, msg, w, l) in crate::winmm::rr_video::take_notifications() {
+            self.messages.push_back(MSG { hwnd: HWND::from_raw(hwnd), message: msg, wParam: w, lParam: l, time: 0, pt: POINT::default() });
+        }
+        for (down, key) in super::rr_windows::due_keys() {
+            self.enqueue_message(if down { host::Message::KeyDown(key) } else { host::Message::KeyUp(key) });
+        }
+        for e in super::rr_windows::due_extra() {
+            match e {
+                super::rr_windows::Extra::Post(hwnd, msg, w, l) => {
+                    log::warn!("rr-key: post hwnd={hwnd:#x} msg={msg:#x} w={w:#x} l={l:#x}");
+                    self.messages.push_back(MSG { hwnd: HWND::from_raw(hwnd), message: msg, wParam: w, lParam: l, time: 0, pt: POINT::default() });
+                }
+                super::rr_windows::Extra::Click(x, y, down) => {
+                    log::warn!("rr-key: click {} at {x},{y}", if down { "down" } else { "up" });
+                    let b = host::MouseButton::Left;
+                    let m = host::MouseMessage { x, y, button: b, buttons: if down { b } else { host::MouseButton::empty() } };
+                    self.enqueue_message(host::Message::MouseMove(host::MouseMessage { x, y, button: b, buttons: host::MouseButton::empty() }));
+                    self.enqueue_message(if down { host::Message::MouseDown(m) } else { host::Message::MouseUp(m) });
+                }
+            }
+        }
+    }
+
     fn paint_msg(&self) -> Option<MSG> {
         let window = self.window.as_ref()?.borrow();
         if !window.dirty {
@@ -197,22 +226,28 @@ impl MessageQueue {
     }
 
     fn peek(&mut self) -> Option<MSG> {
+        self.rr_inject();
         if let Some(msg) = self.messages.front() {
             Some(*msg)
         } else if self.quit.is_some() {
             self.quit
+        } else if let Some(msg) = self.paint_msg() {
+            Some(msg)
         } else {
-            self.paint_msg()
+            rr_timer_due(false)
         }
     }
 
     fn pop(&mut self) -> Option<MSG> {
+        self.rr_inject();
         if let Some(msg) = self.messages.pop_front() {
             Some(msg)
         } else if self.quit.is_some() {
             self.quit.take()
+        } else if let Some(msg) = self.paint_msg() {
+            Some(msg)
         } else {
-            self.paint_msg()
+            rr_timer_due(true)
         }
     }
 
@@ -222,7 +257,13 @@ impl MessageQueue {
             if let Some(msg) = self.pop() {
                 return msg;
             }
-            self.wait_host();
+            if RR_TIMERS.lock().unwrap().is_empty() && !super::rr_windows::script_pending() && !crate::winmm::rr_video::active() {
+                self.wait_host();
+            } else {
+                // Road Rash evaluation: timers pending, so poll instead of blocking.
+                self.poll_host();
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
         }
     }
 
@@ -260,6 +301,12 @@ impl MessageQueue {
         // Every host input event updates the shared input state, whether or not
         // the app reads it through the message queue: DirectInput reads the
         // same state, and this is the only place host events are consumed.
+        // Road Rash evaluation: the WASD layout, unless the game is taking text.
+        let msg = match msg {
+            host::Message::KeyDown(key) => host::Message::KeyDown(super::rr_windows::map_key(key, true)),
+            host::Message::KeyUp(key) => host::Message::KeyUp(super::rr_windows::map_key(key, false)),
+            msg => msg,
+        };
         {
             let mut input = state().input.borrow_mut();
             match &msg {
@@ -272,7 +319,21 @@ impl MessageQueue {
             }
         }
 
-        let msg = self.msg_from_message(msg);
+        let mut msg = self.msg_from_message(msg);
+        // Road Rash evaluation: mouse messages go to the child window under the cursor.
+        // Road Rash evaluation: keystrokes go to the window with keyboard focus.
+        if (0x100..=0x109).contains(&msg.message) {
+            if let Some(h) = super::rr_windows::key_target() {
+                msg.hwnd = HWND::from_raw(h);
+            }
+        }
+        if (0x200..=0x20a).contains(&msg.message) {
+            let (x, y) = ((msg.lParam & 0xffff) as i16 as i32, (msg.lParam >> 16) as i16 as i32);
+            if let Some((h, cx, cy)) = super::rr_windows::hit_test(x, y) {
+                msg.hwnd = HWND::from_raw(h);
+                msg.lParam = ((cy as u32 & 0xffff) << 16) | (cx as u32 & 0xffff);
+            }
+        }
         if *LOG_MESSAGES {
             log::info!("{:#x?}", msg);
         }
@@ -318,8 +379,10 @@ pub fn DispatchMessageA(ctx: &mut Context, lpMsg: Ptr<MSG>) -> u32 {
 
 #[win32_derive::dllexport]
 pub fn DispatchMessageW(ctx: &mut Context, lpMsg: Ptr<MSG>) -> u32 {
-    let wndproc = state().wndclass.borrow().as_ref().unwrap().wndproc.clone();
     let msg = lpMsg.read(&ctx.memory).unwrap();
+    // Road Rash evaluation: route to the window's own class procedure.
+    let wndproc = super::rr_windows::wndproc_for(msg.hwnd.to_raw())
+        .unwrap_or_else(|| state().wndclass.borrow().as_ref().unwrap().wndproc.clone());
     // WNDPROC
     ctx.call32_x86(
         wndproc,
@@ -354,6 +417,9 @@ pub fn PeekMessageA(
     _wMsgFilterMax: u32,
     wRemoveMsg: u32, /* PEEK_MESSAGE_REMOVE_TYPE */
 ) -> bool {
+    if ctx.thread_id != 1 {
+        return super::rr_windows::worker_peek_message(ctx, lpMsg.addr, wRemoveMsg & 1 != 0);
+    }
     let remove = match wRemoveMsg {
         0 => false,   // PM_NOREMOVE
         1 => true,    // PM_REMOVE
@@ -381,6 +447,8 @@ pub fn PeekMessageA(
     if remove {
         queue.pop();
     }
+    drop(queue);
+    super::rr_windows::run_keyboard_hook(ctx, lpMsg.addr, if remove { 0 } else { 3 });
     true
 }
 
@@ -404,7 +472,15 @@ pub fn GetMessageA(
     wMsgFilterMin: u32,
     wMsgFilterMax: u32,
 ) -> i32 {
-    GetMessageW(ctx, lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax)
+    if ctx.thread_id != 1 {
+        // Road Rash evaluation: worker threads get their own message queue
+        // (fed by PostThreadMessage), not the host-driven main queue.
+        return super::rr_windows::worker_get_message(ctx, lpMsg.addr);
+    }
+    let msg_addr = lpMsg.addr;
+    let ret = GetMessageW(ctx, lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax);
+    super::rr_windows::run_keyboard_hook(ctx, msg_addr, 0);
+    ret
 }
 
 #[win32_derive::dllexport]
@@ -417,6 +493,9 @@ pub fn GetMessageW(
 ) -> i32 {
     let msg = state().message_queue.borrow_mut().read();
     if msg.message == WM::QUIT as u32 {
+        // Road Rash evaluation: WM_QUIT must still be written out; programs read
+        // the exit code from its wParam (Road Rash passes the chosen course).
+        lpMsg.write(&mut ctx.memory, msg).unwrap();
         return 0;
     }
 
@@ -489,4 +568,23 @@ pub fn SendMessageW(
     _lParam: LPARAM,
 ) -> u32 {
     todo!()
+}
+
+/// Road Rash evaluation: minimal SetTimer support (WM_TIMER posted to the window).
+pub struct RrTimer {
+    pub hwnd: HWND,
+    pub id: u32,
+    pub period: u32,
+    pub next: u32,
+}
+pub static RR_TIMERS: std::sync::Mutex<Vec<RrTimer>> = std::sync::Mutex::new(Vec::new());
+
+fn rr_timer_due(consume: bool) -> Option<MSG> {
+    let now = host::host().time();
+    let mut timers = RR_TIMERS.lock().unwrap();
+    let t = timers.iter_mut().find(|t| now >= t.next)?;
+    if consume {
+        t.next = now + t.period.max(1);
+    }
+    Some(MSG { hwnd: t.hwnd, message: 0x113 /* WM_TIMER */, wParam: t.id, lParam: 0, time: now, pt: POINT::default() })
 }

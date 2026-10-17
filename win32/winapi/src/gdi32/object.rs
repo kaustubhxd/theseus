@@ -20,8 +20,10 @@ pub fn CreatePen(
     cWidth: i32,
     color: COLORREF,
 ) -> HPEN {
-    assert_eq!(iStyle, 0); // PS_SOLID
-    assert_eq!(cWidth, 1);
+    if iStyle != 0 || cWidth != 1 {
+        // Road Rash evaluation: style/width not supported; draw as a 1px solid pen.
+        log::warn!("rr: CreatePen(style={iStyle}, width={cWidth}) approximated as 1px solid");
+    }
     let pen = Pen(color);
     gdi32::lock().objects.add(Object::Pen(pen))
 }
@@ -101,13 +103,22 @@ pub fn GetStockObject(_ctx: &mut Context, i: GetStockObjectArg) -> HGDIOBJ {
     let object = match i {
         LTGRAY_BRUSH => Object::Brush(Brush(COLORREF::from_rgb(0xc0, 0xc0, 0xc0))),
         BLACK_BRUSH => Object::Brush(Brush(COLORREF::from_rgb(0x00, 0x00, 0x00))),
-        _ => todo!("{:?}", i),
+        // Road Rash evaluation: the null/hollow brush means "don't erase".
+        NULL_BRUSH => return HGDIOBJ::null(),
+        // Road Rash evaluation: approximate other stock objects instead of panicking.
+        _ => {
+            log::warn!("rr: GetStockObject({i:?}) approximated as black brush");
+            Object::Brush(Brush(COLORREF::from_rgb(0x00, 0x00, 0x00)))
+        }
     };
     gdi32::lock().objects.add(object)
 }
 
 #[win32_derive::dllexport]
 pub fn SelectObject(_ctx: &mut Context, hdc: HDC, h: HGDIOBJ) -> HGDIOBJ {
+    if let Some(prev) = crate::rr_text::select_object(hdc.to_raw(), h.to_raw()) {
+        return HGDIOBJ::from_raw(prev); // Road Rash evaluation: surface DCs / our fonts
+    }
     if h.is_null_or_invalid() {
         log::warn!("SelectObject: ignoring null select, likely from a prior stub");
         return HGDIOBJ::null();

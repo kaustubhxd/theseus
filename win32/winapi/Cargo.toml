@@ -13,3 +13,7 @@ runtime = { workspace = true }
 widestring = { workspace = true }
 win32-derive = { path = "../derive" }
 zerocopy = { workspace = true }
+# Road Rash evaluation: TrueType rasterizer for GDI text on surfaces.
+fontdue = "0.9"
+# Road Rash evaluation: General MIDI synthesizer for the midiStream API.
+rustysynth = "1.3"

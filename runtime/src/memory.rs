@@ -105,7 +105,7 @@ impl<'a> Memory<'a> {
 impl Memory<'static> {
     pub fn leak_new(size: usize) -> Self {
         // safety: safe to assume_init on zeroed u8
-        let memory: Box<[u8]> = unsafe { Box::<[u8]>::new_zeroed_slice(size).assume_init() };
+        let memory: Box<[u8]> = vec![0u8; size].into_boxed_slice();
         let static_memory: &'static mut [u8] = Box::leak(memory);
         Memory::new(static_memory)
     }

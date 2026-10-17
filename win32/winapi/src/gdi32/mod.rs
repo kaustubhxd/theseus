@@ -65,3 +65,7 @@ impl COLORREF {
         [r, g, b]
     }
 }
+
+#[path = "../rr_stubs_gdi32.rs"]
+mod rr_stubs;
+pub use rr_stubs::*;

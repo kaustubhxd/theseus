@@ -64,23 +64,48 @@ impl Window {
     }
 }
 
-pub struct AudioStream {}
+/// Road Rash evaluation: audio through the page. Samples (stereo i16) go into
+/// a ring buffer in shared wasm memory; the page's Web Audio callback reads
+/// it directly and advances `read`.
+#[repr(C)]
+pub struct AudioRing {
+    /// Samples consumed by the page (monotonic, wraps at u32).
+    read: std::sync::atomic::AtomicU32,
+    /// Samples produced (monotonic, wraps at u32).
+    write: std::sync::atomic::AtomicU32,
+    /// Ring capacity in samples.
+    cap: u32,
+    data: [i16; AUDIO_RING_SAMPLES],
+}
+const AUDIO_RING_SAMPLES: usize = 44100 * 2; // one second of stereo audio
+
+pub struct AudioStream {
+    ring: &'static AudioRing,
+}
 impl AudioStream {
-    /// No audio in the wasm host yet; see the web front end.
     pub fn is_open(&self) -> bool {
-        false
+        true
     }
 
     pub fn queued_bytes(&self) -> u32 {
-        todo!()
-    }
-    pub fn put_data(&self, _data: &[u8]) {
-        todo!()
+        use std::sync::atomic::Ordering::Acquire;
+        self.ring.write.load(Acquire).wrapping_sub(self.ring.read.load(Acquire)) * 2
     }
 
-    pub fn resume(&self) {
-        todo!()
+    pub fn put_data(&self, data: &[u8]) {
+        use std::sync::atomic::Ordering::{Acquire, Release};
+        let ring = self.ring as *const AudioRing as *mut AudioRing;
+        let mut w = self.ring.write.load(Acquire);
+        let free = self.ring.cap - w.wrapping_sub(self.ring.read.load(Acquire));
+        for pair in data.chunks_exact(2).take(free as usize) {
+            // safety: only this (producer) side writes samples, the page only reads.
+            unsafe { (*ring).data[(w % self.ring.cap) as usize] = i16::from_le_bytes([pair[0], pair[1]]) };
+            w = w.wrapping_add(1);
+        }
+        self.ring.write.store(w, Release);
     }
+
+    pub fn resume(&self) {}
 }
 
 pub struct Host {
@@ -108,16 +133,30 @@ impl Host {
         Window::new(title, width, height)
     }
 
-    pub fn create_audio_stream(&self, _spec: host::AudioSpec) -> AudioStream {
-        todo!()
+    pub fn create_audio_stream(&self, spec: host::AudioSpec) -> AudioStream {
+        let ring: &'static AudioRing = Box::leak(Box::new(AudioRing {
+            read: Default::default(),
+            write: Default::default(),
+            cap: AUDIO_RING_SAMPLES as u32,
+            data: [0; AUDIO_RING_SAMPLES],
+        }));
+        self.chan
+            .lock()
+            .unwrap()
+            .create_audio(ring as *const AudioRing as u32, spec.sample_rate, spec.channels as u32);
+        AudioStream { ring }
     }
 
     pub fn time(&self) -> u32 {
-        js_sys::global()
-            .unchecked_into::<web_sys::WorkerGlobalScope>()
-            .performance()
-            .unwrap()
-            .now() as u32
+        // Road Rash evaluation: performance.now() counts from each worker's own
+        // start, so threads in other workers disagreed. Use absolute time minus a
+        // base kept in (shared) linear memory instead.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static BASE: AtomicU64 = AtomicU64::new(0);
+        let perf = js_sys::global().unchecked_into::<web_sys::WorkerGlobalScope>().performance().unwrap();
+        let abs = (perf.time_origin() + perf.now()) as u64;
+        let _ = BASE.compare_exchange(0, abs, Ordering::SeqCst, Ordering::SeqCst);
+        (abs - BASE.load(Ordering::SeqCst)) as u32
     }
 
     pub fn console_write(&self, text: &[u8]) {
@@ -160,6 +199,7 @@ export interface WasmHost {
     console_write(ptr: number, len: number): void;
 
     create_surface(width: number, height: number): number;
+    create_audio(ring: number, rate: number, channels: number): number;
 
     create_window(title: string, width: number, height: number): number;
     resize_window(window_id: number, width: number, height: number): void;
@@ -168,6 +208,7 @@ export interface WasmHost {
     set_pixels(surface_id: number, ptr: number, len: number): void;
 
     write_file(path: string, ptr: number, len: number): number;
+    choose_file(save: boolean, names: string[], proposed: string): Promise<number[]>;
 
     poll_message(): number[];
     wait_message(): Promise<number[]>;
@@ -196,6 +237,14 @@ impl WebHostSendChannel {
         args.push(&JsValue::from(width));
         args.push(&JsValue::from(height));
         self.send_sync("create_surface", args)
+    }
+
+    pub fn create_audio(&mut self, ring: u32, rate: u32, channels: u32) -> i32 {
+        let args = js_sys::Array::new();
+        args.push(&JsValue::from(ring));
+        args.push(&JsValue::from(rate));
+        args.push(&JsValue::from(channels));
+        self.send_sync("create_audio", args)
     }
 
     pub fn create_window(&mut self, title: &str, width: u32, height: u32) -> i32 {
@@ -269,6 +318,8 @@ impl WebHostSendChannel {
                     vkey: buf[2] as u8,
                     extended: buf[3] & 1 != 0,
                     repeat: buf[3] & 2 != 0,
+                    // The key before the WASD remap, for typed characters.
+                    text_vkey: buf.get(4).copied().unwrap_or(buf[2]) as u8,
                 };
                 if buf[0] == 5 {
                     host::Message::KeyDown(key)
@@ -298,7 +349,7 @@ impl WebHostSendChannel {
         buf[0]
     }
 
-    fn send_sync_buf(&mut self, msg: &str, args: js_sys::Array, buf: &mut [i32]) {
+    pub fn send_sync_buf(&mut self, msg: &str, args: js_sys::Array, buf: &mut [i32]) {
         send_to_host(msg, args, buf.as_ptr() as *mut i32 as u32);
         unsafe {
             wasm32::memory_atomic_wait32(buf.as_ptr() as *mut _, 0, -1);
@@ -308,4 +359,41 @@ impl WebHostSendChannel {
     fn send_async(&mut self, msg: &str, args: js_sys::Array) {
         send_to_host(msg, args, 0);
     }
+}
+
+/// Road Rash evaluation: start a thread. The page spawns a Web Worker that
+/// instantiates this module on the same shared memory and calls
+/// `rr_thread_entry` with the boxed closure.
+pub fn spawn(f: Box<dyn FnOnce() + Send + 'static>) {
+    let ptr = Box::into_raw(Box::new(f)) as u32;
+    let g = js_sys::global();
+    let func: js_sys::Function = js_sys::Reflect::get(&g, &"rr_spawn_thread".into())
+        .unwrap()
+        .unchecked_into();
+    func.call1(&JsValue::NULL, &JsValue::from(ptr)).unwrap();
+}
+
+#[wasm_bindgen]
+pub fn rr_thread_entry(ptr: u32) {
+    let f = unsafe { Box::from_raw(ptr as *mut Box<dyn FnOnce() + Send + 'static>) };
+    f();
+}
+
+/// Road Rash evaluation: ask the page to pick a save file (save or load).
+/// None = cancelled. The page answers with [1, chars...] or [-1].
+pub fn choose_file(save: bool, names: &[String], proposed: &str) -> Option<String> {
+    let args = js_sys::Array::new();
+    args.push(&JsValue::from(save));
+    let list = js_sys::Array::new();
+    for n in names {
+        list.push(&JsValue::from(n.as_str()));
+    }
+    args.push(&list);
+    args.push(&JsValue::from(proposed));
+    let mut buf = [0i32; 65];
+    crate::host().chan.lock().unwrap().send_sync_buf("choose_file", args, &mut buf);
+    if buf[0] != 1 {
+        return None;
+    }
+    Some(buf[1..].iter().take_while(|c| **c != 0).filter_map(|c| char::from_u32(*c as u32)).collect())
 }

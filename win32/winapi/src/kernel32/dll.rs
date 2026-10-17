@@ -127,7 +127,10 @@ pub fn GetModuleHandleA(ctx: &mut Context, lpModuleName: Ptr<u8>) -> HMODULE {
 #[win32_derive::dllexport]
 pub fn LoadLibraryA(ctx: &mut Context, lpLibFileName: Ptr<u8>) -> HMODULE {
     let filename = ctx.memory.read_str(lpLibFileName.addr);
-    let addr = lock().dlls.load_library(&filename);
+    let mut addr = lock().dlls.load_library(&filename);
+    if addr == 0 {
+        addr = crate::rr_resdll::load(&filename); // Road Rash evaluation shim
+    }
     if addr == 0 {
         log::warn!("LoadLibrary({filename}): not supported, returning null");
     }

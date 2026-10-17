@@ -173,11 +173,15 @@ const KEY_MAP: &[(sdl::scancode::SDL_Scancode, u8, u8, bool)] = {
 
 fn key_from_sdl(event: &sdl::events::SDL_KeyboardEvent) -> Option<host::KeyMessage> {
     let &(_, scancode, vkey, extended) = KEY_MAP.iter().find(|key| key.0 == event.scancode)?;
+    // Road Rash evaluation: the WASD layout is applied in user32 (it needs to
+    // know when the game is taking typed text), so the physical key goes in.
+    let text_vkey = vkey;
     Some(host::KeyMessage {
         scancode,
         vkey,
         extended,
         repeat: event.repeat,
+        text_vkey,
     })
 }
 
@@ -261,7 +265,12 @@ impl MainThread {
                 sdl::hints::SDL_HINT_RENDER_VSYNC,
                 c"1".as_ptr(),
             ));
-            check(sdl::init::SDL_Init(if headless {
+            // Road Rash evaluation: headless runs still mix audio (so it can be
+            // measured) when the silent dummy driver is selected.
+            let silent_audio = std::env::var("SDL_AUDIODRIVER").is_ok_and(|d| d == "dummy");
+            check(sdl::init::SDL_Init(if headless && silent_audio {
+                sdl::init::SDL_INIT_EVENTS | sdl::init::SDL_INIT_AUDIO
+            } else if headless {
                 sdl::init::SDL_INIT_EVENTS
             } else {
                 sdl::init::SDL_INIT_VIDEO | sdl::init::SDL_INIT_AUDIO
@@ -368,6 +377,14 @@ impl Window {
             return;
         }
         unsafe {
+            // Road Rash evaluation: presenting to an occluded/minimized/hidden
+            // window can block on vsync for a long time on macOS, stalling the
+            // game; skip it, since nothing is visible anyway.
+            let flags = sdl::video::SDL_GetWindowFlags(self.window);
+            let invisible = sdl::video::SDL_WINDOW_OCCLUDED | sdl::video::SDL_WINDOW_MINIMIZED | sdl::video::SDL_WINDOW_HIDDEN;
+            if flags.0 & invisible.0 != 0 {
+                return;
+            }
             // For debugging, can verify that the flip covers the entire canvas by starting with red:
             // check(sdl::render::SDL_SetRenderDrawColor(
             //     self.renderer,

@@ -76,7 +76,8 @@ pub fn GetMenuItemRect(
 
 #[win32_derive::dllexport]
 pub fn KillTimer(_ctx: &mut Context, _hWnd: HWND, _uIDEvent: u32) -> bool {
-    todo!()
+    crate::user32::RR_TIMERS.lock().unwrap().retain(|t| !(t.hwnd == _hWnd && t.id == _uIDEvent));
+    true
 }
 
 #[win32_derive::dllexport]
@@ -140,7 +141,14 @@ pub fn SetTimer(
     _uElapse: u32,
     _lpTimerFunc: Ptr<()>, /* TIMERPROC */
 ) -> u32 {
-    stub!(0) // fail
+    // Road Rash evaluation: window timers delivered as WM_TIMER; TIMERPROC unsupported.
+    if _lpTimerFunc.addr != 0 {
+        log::warn!("rr: SetTimer with TIMERPROC not supported");
+    }
+    let mut timers = crate::user32::RR_TIMERS.lock().unwrap();
+    timers.retain(|t| !(t.hwnd == _hWnd && t.id == _nIDEvent));
+    timers.push(crate::user32::RrTimer { hwnd: _hWnd, id: _nIDEvent, period: _uElapse, next: host::host().time() + _uElapse });
+    _nIDEvent.max(1)
 }
 
 // XXX: cdecl

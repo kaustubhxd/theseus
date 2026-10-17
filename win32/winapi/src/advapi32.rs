@@ -53,7 +53,7 @@ pub fn RegOpenKeyExA(
     _samDesired: u32, /* REG_SAM_FLAGS */
     _phkResult: HKEY,
 ) -> u32 /* WIN32_ERROR */ {
-    stub!(0)
+    crate::rr_registry::open_key(_ctx, _hKey, _lpSubKey, _phkResult) // Road Rash evaluation
 }
 
 #[win32_derive::dllexport]
@@ -66,7 +66,7 @@ pub fn RegQueryValueExA(
     _lpData: u32,
     _lpcbData: u32,
 ) -> u32 /* WIN32_ERROR */ {
-    stub!(ERROR_FILE_NOT_FOUND)
+    crate::rr_registry::query_value(_ctx, _hKey, _lpValueName, _lpType, _lpData, _lpcbData) // Road Rash evaluation
 }
 
 #[win32_derive::dllexport]
@@ -94,3 +94,7 @@ pub fn RegSetValueExW(
 ) -> u32 /* WIN32_ERROR */ {
     stub!(0)
 }
+
+#[path = "rr_stubs_advapi32.rs"]
+mod rr_stubs;
+pub use rr_stubs::*;

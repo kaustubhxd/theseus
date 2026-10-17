@@ -6,6 +6,7 @@ members = [
   "host",
   "logger",
   "out/basicdd",
+  "out/roadrash",
   "out/chillin",
   "out/chillin-unpack",
   "out/dos/magixfly",
@@ -53,4 +54,5 @@ debug-assertions = false
 overflow-checks = false
 
 [profile.release]
-debug = true
+# Road Rash evaluation: line tables only (was full debug info) to save disk.
+debug = "line-tables-only"

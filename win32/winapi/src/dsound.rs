@@ -260,6 +260,8 @@ impl State {
             }
         }
 
+        // Road Rash evaluation: General MIDI music (midiStream*) joins the mix.
+        crate::winmm::rr_midi::mix_into(&mut mixed[..]);
         let mut bytes = Vec::with_capacity(CHUNK_FRAMES * HOST_FRAME_BYTES as usize);
         for (left, right) in mixed {
             for sample in [left, right] {
